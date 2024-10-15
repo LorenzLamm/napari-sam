@@ -826,8 +826,7 @@ class SamWidget(QWidget):
                 self.label_layer.selected_label = picked_label
                 yield
         elif self.annotator_mode == AnnotatorMode.BBOX:
-            #if (not CONTROL in event.modifiers) and event.button == 3:  # Positive middle click
-            if (CONTROL in event.modifiers) and event.button == 1:
+            if (CONTROL in event.modifiers) and event.button == 1: # Positive middle click
                 self.do_bbox_click(coords, BboxState.CLICK)
                 yield
                 while event.type == 'mouse_move':
