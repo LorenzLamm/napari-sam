@@ -1029,6 +1029,7 @@ class SamWidget(QWidget):
                 #This is to avoid relying on making bboxes always the same way.
                 distance = cdist(initial_box, bbox_final)
                 bbox_final = bbox_final[linear_sum_assignment(distance)[1]]
+                self.bboxes[new_label].append(bbox_final)
 
                 prediction = self.predict_sam(points=None, labels=None, bbox=copy.deepcopy(bbox_final),
                                               x_coord=x_coord)
