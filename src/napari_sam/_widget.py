@@ -805,10 +805,10 @@ class SamWidget(QWidget):
         data_coordinates = self.image_layer.world_to_data(event.position)
         coords = np.round(data_coordinates).astype(int)
         if self.annotator_mode == AnnotatorMode.CLICK:
-            if (not CONTROL in event.modifiers) and event.button == 2:  # Positive middle click
+            if (not CONTROL in event.modifiers) and event.button == 3:  # Positive middle click
                 self.do_point_click(coords, 1)
                 yield
-            elif CONTROL in event.modifiers and event.button == 1:  # Negative middle click
+            elif CONTROL in event.modifiers and event.button == 3:  # Negative middle click
                 self.do_point_click(coords, 0)
                 yield
             elif (not CONTROL in event.modifiers) and event.button == 1 and self.points_layer is not None and len(self.points_layer.data) > 0:
