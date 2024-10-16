@@ -11,7 +11,7 @@ from segment_anything import SamPredictor, build_sam_vit_h, build_sam_vit_l, bui
 from segment_anything.automatic_mask_generator import SamAutomaticMaskGenerator
 from napari_sam.utils import normalize
 import torch
-from vispy.util.keys import CONTROL
+from vispy.util.keys import CONTROL, ALT
 import copy
 import warnings
 from tqdm import tqdm
@@ -21,6 +21,8 @@ import urllib.request
 from pathlib import Path
 import os
 from os.path import join
+from scipy.spatial.distance import cdist
+from scipy.optimize import linear_sum_assignment
 
 
 class AnnotatorMode(Enum):
@@ -826,7 +828,12 @@ class SamWidget(QWidget):
                 self.label_layer.selected_label = picked_label
                 yield
         elif self.annotator_mode == AnnotatorMode.BBOX:
-            if (not CONTROL in event.modifiers) and event.button == 3:  # Positive middle click
+            """
+            This was modified to allow propagation of bboxes across different slices.
+            User should first draw a bbox as before using CONTROL. Afterwards, they can choose to propagate it 
+            pressing ALT and drawing the desired bbox or just clicking on the screen.
+            """
+            if ((CONTROL in event.modifiers) or (ALT in event.modifiers)) and event.button == 1: # Positive middle click
                 self.do_bbox_click(coords, BboxState.CLICK)
                 yield
                 while event.type == 'mouse_move':
@@ -836,7 +843,10 @@ class SamWidget(QWidget):
                     yield
                 data_coordinates = self.image_layer.world_to_data(event.position)
                 coords = np.round(data_coordinates).astype(int)
-                self.do_bbox_click(coords, BboxState.RELEASE)
+                self.do_bbox_click(coords, BboxState.RELEASE,ALT in event.modifiers) #Propagation or not
+
+
+
 
     def on_delete(self, layer):
         selected_points = list(self.points_layer.selected_data)
@@ -966,7 +976,7 @@ class SamWidget(QWidget):
             self.old_points = copy.deepcopy(self.points_layer.data)
             # self.label_layer.refresh()
 
-    def do_bbox_click(self, coords, bbox_state):
+    def do_bbox_click(self, coords, bbox_state, propagation=False):
         if bbox_state == BboxState.CLICK:
             if not (self.image_layer.ndim == 2 or self.image_layer.ndim == 3):
                 raise RuntimeError("Only 2D and 3D images are supported.")
@@ -993,14 +1003,55 @@ class SamWidget(QWidget):
 
             new_label = self.label_layer.selected_label
             if self.check_auto_inc_bbox.isChecked():
-                new_label = np.max(self.label_layer.data) + 1
+                new_label = np.max(self.label_layer.data) + 1 - int(propagation) #keep the same label when propagating
                 self.label_layer.selected_label = new_label
 
             bbox_final = np.rint(bbox_final).astype(np.int32)
-            self.bboxes[new_label].append(bbox_final)
-            self.update_bbox_layer(self.bboxes)
+            if propagation:
+                """
+                This is meant to be a way of connecting an initial and final bounding boxes and getting segmentation
+                masks on each of the intermediate slices.
+                The way to do this is by assuming you want to draw a cuboid from the last bbox you made to the one 
+                you just created.
+                There are two ways of propagation. The first one is to copy your previous bbox in your current slice
+                and the second is to draw a new bbox.
+                """
 
-            prediction = self.predict_sam(points=None, labels=None, bbox=copy.deepcopy(bbox_final), x_coord=x_coord)
+                prev_box = self.label_layer.selected_label
+                initial_box = list(self.bboxes.values())[prev_box - 1][-1] #picking your last bbox
+
+                #in case you want copy your previous bbox on a new slice. Using the diagonal length to detect you just
+                #clicked on the GUI.
+                if np.linalg.norm(bbox_final[0]-bbox_final[2]) == 0:
+                    bbox_final[:,1:] = list(self.bboxes.values())[prev_box-1][-1][:,1:]
+
+                #Using the hungarian algorithm to connect the corners from your bboxes.
+                #This is to avoid relying on making bboxes always the same way.
+                distance = cdist(initial_box, bbox_final)
+                bbox_final = bbox_final[linear_sum_assignment(distance)[1]]
+                self.bboxes[new_label].append(bbox_final)
+
+                prediction = self.predict_sam(points=None, labels=None, bbox=copy.deepcopy(bbox_final),
+                                              x_coord=x_coord)
+
+                #The propagation will take place by a linear interpolation. Thus the director vector
+                director_vector = bbox_final - initial_box
+                #Taking the upper and downer slices so user is not restricted to an order when drawing bboxes
+                mins, maxs = np.amin([initial_box[0, 0], bbox_final[0, 0]]), np.amax([initial_box[0, 0], bbox_final[0, 0]])
+                for sl in range(mins, maxs + 1):
+                    #Solving the linear equation for each intermediate slice
+                    lambda_value = (sl - initial_box[0, 0]) / director_vector[:, 0]
+                    prop_slice = initial_box + np.expand_dims(lambda_value, axis=-1) * director_vector
+                    prop_slice = np.rint(prop_slice).astype(np.int32)
+                    self.bboxes[new_label].append(prop_slice)
+                    #Cumulation of predictions
+                    prediction += self.predict_sam(points=None, labels=None, bbox=copy.deepcopy(prop_slice),
+                                                   x_coord=sl)
+                self.update_bbox_layer(self.bboxes)
+            else:
+                self.bboxes[new_label].append(bbox_final)
+                self.update_bbox_layer(self.bboxes)
+                prediction = self.predict_sam(points=None, labels=None, bbox=copy.deepcopy(bbox_final), x_coord=x_coord)
 
             label_layer = np.asarray(self.label_layer.data)
             changed_indices = np.where(prediction == 1)
