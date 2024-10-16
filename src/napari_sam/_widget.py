@@ -828,6 +828,11 @@ class SamWidget(QWidget):
                 self.label_layer.selected_label = picked_label
                 yield
         elif self.annotator_mode == AnnotatorMode.BBOX:
+            """
+            This was modified to allow propagation of bboxes across different slices.
+            User should first draw a bbox as before using CONTROL. Afterwards, they can choose to propagate it 
+            pressing ALT and drawing the desired bbox or just clicking on the screen.
+            """
             if ((CONTROL in event.modifiers) or (ALT in event.modifiers)) and event.button == 1: # Positive middle click
                 self.do_bbox_click(coords, BboxState.CLICK)
                 yield
@@ -838,7 +843,7 @@ class SamWidget(QWidget):
                     yield
                 data_coordinates = self.image_layer.world_to_data(event.position)
                 coords = np.round(data_coordinates).astype(int)
-                self.do_bbox_click(coords, BboxState.RELEASE,ALT in event.modifiers)
+                self.do_bbox_click(coords, BboxState.RELEASE,ALT in event.modifiers) #Propagation or not
 
 
 
@@ -998,31 +1003,49 @@ class SamWidget(QWidget):
 
             new_label = self.label_layer.selected_label
             if self.check_auto_inc_bbox.isChecked():
-                new_label = np.max(self.label_layer.data) + 1
+                new_label = np.max(self.label_layer.data) + 1 - int(propagation) #keep the same label when propagating
                 self.label_layer.selected_label = new_label
 
             bbox_final = np.rint(bbox_final).astype(np.int32)
             if propagation:
-                cur_area = np.linalg.norm(bbox_final[0]-bbox_final[2])
-                prev_box = np.amax(list(self.bboxes.keys()))
-                initial_box = list(self.bboxes.values())[prev_box - 1][-1]
-                if cur_area == 0:
+                """
+                This is meant to be a way of connecting an initial and final bounding boxes and getting segmentation
+                masks on each of the intermediate slices.
+                The way to do this is by assuming you want to draw a cuboid from the last bbox you made to the one 
+                you just created.
+                There are two ways of propagation. The first one is to copy your previous bbox in your current slice
+                and the second is to draw a new bbox.
+                """
+
+                prev_box = self.label_layer.selected_label
+                initial_box = list(self.bboxes.values())[prev_box - 1][-1] #picking your last bbox
+
+                #in case you want copy your previous bbox on a new slice. Using the diagonal length to detect you just
+                #clicked on the GUI.
+                if np.linalg.norm(bbox_final[0]-bbox_final[2]) == 0:
                     bbox_final[:,1:] = list(self.bboxes.values())[prev_box-1][-1][:,1:]
 
+                #Using the hungarian algorithm to connect the corners from your bboxes.
+                #This is to avoid relying on making bboxes always the same way.
                 distance = cdist(initial_box, bbox_final)
                 bbox_final = bbox_final[linear_sum_assignment(distance)[1]]
+
                 prediction = self.predict_sam(points=None, labels=None, bbox=copy.deepcopy(bbox_final),
                                               x_coord=x_coord)
+
+                #The propagation will take place by a linear interpolation. Thus the director vector
                 director_vector = bbox_final - initial_box
+                #Taking the upper and downer slices so user is not restricted to an order when drawing bboxes
                 mins, maxs = np.amin([initial_box[0, 0], bbox_final[0, 0]]), np.amax([initial_box[0, 0], bbox_final[0, 0]])
-                for slice in range(mins, maxs + 1):
-                    l = (slice - initial_box[0, 0]) / director_vector[:, 0]
-                    prop_slice = initial_box + np.expand_dims(l, axis=-1) * director_vector
+                for sl in range(mins, maxs + 1):
+                    #Solving the linear equation for each intermediate slice
+                    lambda_value = (sl - initial_box[0, 0]) / director_vector[:, 0]
+                    prop_slice = initial_box + np.expand_dims(lambda_value, axis=-1) * director_vector
                     prop_slice = np.rint(prop_slice).astype(np.int32)
                     self.bboxes[new_label].append(prop_slice)
+                    #Cumulation of predictions
                     prediction += self.predict_sam(points=None, labels=None, bbox=copy.deepcopy(prop_slice),
-                                                   x_coord=slice)
-                prediction = np.clip(prediction, 0, 1)
+                                                   x_coord=sl)
                 self.update_bbox_layer(self.bboxes)
             else:
                 self.bboxes[new_label].append(bbox_final)
